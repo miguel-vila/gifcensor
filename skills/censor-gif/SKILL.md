@@ -9,17 +9,42 @@ Drive `gifcensor.py` through four phases. It gives you eyes (`sheet`, `zoom`,
 `strip`, `colors`), one hand (`apply`) and a check (`verify`). You supply the
 judgement about what counts as private.
 
+## 0. Set up
+
+`gifcensor.py` sits next to this file, in the skill's own directory. Your
+harness names that directory when it loads a skill; Claude Code prints
+"Base directory for this skill: …". If you were not told it:
+
 ```
-GC="python3 -I ~/repos/gifcensor/gifcensor.py"
+find ~ -name gifcensor.py -path '*censor-gif*' 2>/dev/null | head -1
 ```
 
-Work in the scratchpad. Never overwrite the source GIF.
+Make a working directory outside the user's project (a scratch or temp
+directory), and put a wrapper there, so no later command depends on how your
+shell splits a variable:
+
+```
+printf '#!/bin/sh\nexec python3 -I "<skill dir>/gifcensor.py" "$@"\n' > gc
+chmod +x gc
+```
+
+Every example below calls `./gc`. The tool needs `ffmpeg`, `ffprobe`,
+`magick` (ImageMagick 7) and Python 3.10+. Check first, and if one is missing,
+tell the user the install line for their platform (`brew install ffmpeg
+imagemagick`) rather than working around it:
+
+```
+command -v ffmpeg ffprobe magick
+```
+
+Never write to the source GIF. Default the output to a new file beside it,
+`<name> (censored).gif`.
 
 ## 1. Survey
 
 ```
-$GC probe in.gif
-$GC sheet in.gif -o sheet.png --count 21 --cols 3
+./gc probe in.gif
+./gc sheet in.gif -o sheet.png --count 21 --cols 3
 ```
 
 Read `sheet.png`. Frame numbers are burned under each tile. Write down every
@@ -36,7 +61,7 @@ Never take a coordinate off the contact sheet. The sheet is scaled down, and a
 box that is a few pixels short leaks the top of the text.
 
 ```
-$GC zoom in.gif -o z.png --frame 97 --box 560,40,900,140
+./gc zoom in.gif -o z.png --frame 97 --box 560,40,900,140
 ```
 
 The pink grid is labelled in **source** pixels. Read the box straight off it,
@@ -59,7 +84,7 @@ column of each run gives you an exact edge.
 Find the first and last frame a thing is on screen:
 
 ```
-$GC strip in.gif -o s.png --box 586,178,380,40 --frames 40:190
+./gc strip in.gif -o s.png --box 586,178,380,40 --frames 40:190
 ```
 
 One row per frame with its number on the left, columns read top-to-bottom then
@@ -101,7 +126,7 @@ Write `plan.json`:
 - `color` overrides the fill in either style.
 
 ```
-$GC apply plan.json          # --dry-run prints the ffmpeg filter graph
+./gc apply plan.json          # --dry-run prints the ffmpeg filter graph
 ```
 
 One pass, one re-encode, palette regenerated per frame, so quality holds.
@@ -109,8 +134,8 @@ One pass, one re-encode, palette regenerated per frame, so quality holds.
 ## 4. Verify, then verify with your eyes
 
 ```
-$GC verify plan.json --outdir vcheck
-$GC sheet out.gif -o out_sheet.png --count 21
+./gc verify plan.json --outdir vcheck
+./gc sheet out.gif -o out_sheet.png --count 21
 ```
 
 `verify` reports `machine_pass` per redaction: the inside of the box is one flat

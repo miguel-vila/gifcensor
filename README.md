@@ -3,11 +3,24 @@
 Cover private regions of a GIF screen recording, and check that the cover holds.
 
 Finding *what* to censor needs a pair of eyes. Applying and checking it does
-not. This tool is the deterministic half: it turns a GIF into images a vision
-model can read precisely, applies a redaction plan, and checks the result. The
-AI half lives in `skill/SKILL.md`, which drives it.
+not. This repo is both halves: `gifcensor.py` is the deterministic one, which
+turns a GIF into images a vision model can read precisely, applies a redaction
+plan, and checks the result; `SKILL.md` is the prompt that drives it.
 
-    python3 -I gifcensor.py --help
+## Install
+
+As a skill, for any agent the [skills](https://skills.sh) CLI supports:
+
+    npx skills add miguel-vila/gifcensor
+
+Add `-g` to install it for every project, `-a claude-code` to pick one agent.
+Then ask your agent to censor a GIF.
+
+Or use the CLI on its own:
+
+    python3 -I skills/censor-gif/gifcensor.py --help
+
+## Commands
 
 | group | command | purpose |
 |---|---|---|
@@ -66,3 +79,15 @@ back to source pixel coordinates.
 ## Requirements
 
 ffmpeg, ffprobe, ImageMagick 7 (`magick`), Python 3.10+ (standard library only).
+
+    brew install ffmpeg imagemagick
+
+## Layout
+
+    skills/censor-gif/SKILL.md    the prompt that drives the tool
+    skills/censor-gif/gifcensor.py
+    skills/censor-gif/examples/plan.example.json
+
+## License
+
+MIT.
