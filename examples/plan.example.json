@@ -1,0 +1,18 @@
+{
+  "source": "/Users/miguelvilagonzalez/Movies/Kaptures/Kapture 2026-11-12 at 23.59.34.gif",
+  "output": "/private/tmp/claude-501/-Users-miguelvilagonzalez-repos/b13a684e-2ccb-4aa4-943b-7c011cf20165/scratchpad/out.gif",
+  "redactions": [
+    {"label": "browser url bar",     "box": [380, 67, 975, 30], "frames": [[0, 291]]},
+    {"label": "tab title",           "box": [150, 28, 186, 28], "frames": [[0, 291]]},
+    {"label": "bookmarks bar",       "box": [24, 101, 1436, 32], "frames": "all"},
+    {"label": "breadcrumb",          "box": [130, 156, 224, 26], "frames": [[0, 230]]},
+    {"label": "revision id",         "box": [1256, 476, 204, 58], "frames": [[0, 230]]},
+    {"label": "panel row 1",         "box": [628, 278, 256, 16], "frames": [[61, 123], [125, 171]]},
+    {"label": "panel row 2",         "box": [628, 320, 256, 16], "frames": [[61, 123], [125, 171]]},
+    {"label": "panel row 3",         "box": [628, 362, 256, 16], "frames": [[61, 123]]},
+    {"label": "sso row 1",           "box": [598, 256, 508, 22], "frames": [[293, 324]]},
+    {"label": "sso row 2",           "box": [598, 387, 508, 22], "frames": [[293, 324]]},
+    {"label": "sso row 3",           "box": [598, 518, 508, 22], "frames": [[293, 324]]},
+    {"label": "sso row 4",           "box": [598, 649, 508, 22], "frames": [[293, 324]]}
+  ]
+}
