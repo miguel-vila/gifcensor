@@ -43,6 +43,19 @@ The pink grid is labelled in **source** pixels. Read the box straight off it,
 then add about 4px of margin on each side: anti-aliased text bleeds past its
 glyph box.
 
+When a box has to land between glyphs — covering one word of a string and
+leaving the rest readable — measure instead of guessing. Crop the text line,
+flatten it to one row, and read off the columns that carry ink:
+
+```
+ffmpeg -v error -i in.gif -vf "select='eq(n,310)',crop=180:20:640:306" \
+       -fps_mode passthrough row.png
+magick row.png -colorspace gray -resize 180x1! txt:-
+```
+
+Columns near the background value are gaps between glyphs; the first and last
+column of each run gives you an exact edge.
+
 Find the first and last frame a thing is on screen:
 
 ```
@@ -80,10 +93,12 @@ Write `plan.json`:
 
 - `box` is `[x, y, w, h]` in source pixels.
 - `frames` is `"all"` or a list of inclusive `[first, last]` ranges.
-- `color` defaults to `"auto"`: the tool samples the ring just outside the box
-  and fills with the surrounding chrome colour, so the cover reads as part of
-  the UI instead of a black bar. Override only when auto picks up the text
-  itself.
+- `style` defaults to `block`: a grey panel with an accent border, so a viewer
+  can see that something was removed. Set `"style": "blend"` on the plan or on
+  one redaction to fill with the colour of the UI around the box instead, which
+  hides the fact of the redaction. Ask yourself which the user wants; when they
+  say the covers are too easy to miss, they want `block`.
+- `color` overrides the fill in either style.
 
 ```
 $GC apply plan.json          # --dry-run prints the ffmpeg filter graph
@@ -98,8 +113,8 @@ $GC verify plan.json --outdir vcheck
 $GC sheet out.gif -o out_sheet.png --count 21
 ```
 
-`verify` reports `machine_pass` per redaction: the box is one flat colour and
-differs from the source. That only catches coordinate mistakes.
+`verify` reports `machine_pass` per redaction: the inside of the box is one flat
+colour and differs from the source. That only catches coordinate mistakes.
 
 Then look. Open every image in `vcheck/`. Rows are labelled `before`, `in`,
 `after`:

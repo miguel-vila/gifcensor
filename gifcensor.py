@@ -29,6 +29,8 @@ FONT_CANDIDATES = (
     "/Library/Fonts/Arial.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 )
+BLOCK_FILL = "#6B6B73"   # reads as a cover on both dark and light UIs
+BLOCK_EDGE = "#FF375F"   # accent border, so a cover is never mistaken for chrome
 LABEL_BG = "#101010"
 LABEL_FG = "#00ff66"
 GRID_INK = "#ff2d95"
@@ -68,6 +70,9 @@ class Box:
         if len(parts) != 4:
             sys.exit(f"gifcensor: bad box {s!r}, want x,y,w,h")
         return Box(*(int(float(p)) for p in parts))
+
+    def inset(self, m: int) -> "Box":
+        return Box(self.x + m, self.y + m, max(1, self.w - 2 * m), max(1, self.h - 2 * m))
 
     def grow(self, m: int, within: tuple[int, int]) -> "Box":
         x = max(0, self.x - m)
@@ -199,6 +204,11 @@ def normalise_color(v: str) -> str:
     return "#" + out.strip()[:6].upper()
 
 
+def crop_to(src: Path, box: Box, dst: Path) -> Path:
+    run(["magick", src, "-crop", box.crop(), "+repage", str(dst)])
+    return dst
+
+
 def crop_stats(img: Path, box: Box) -> float:
     """Normalised standard deviation of a region. 0 means one flat colour."""
     out = run(["magick", img, "-crop", box.crop(), "+repage",
@@ -261,6 +271,7 @@ class Redaction:
     box: Box
     ranges: list[tuple[int, int]] | None  # None means every frame
     color: str  # "#RRGGBB" or "auto"
+    style: str  # "block": a visible cover; "blend": take the colour around it
 
     def enable(self) -> str | None:
         if self.ranges is None:
@@ -299,6 +310,7 @@ class Plan:
         out = output_override or d.get("output") or str(src.with_name(src.stem + " (censored)" + src.suffix))
         out_p = Path(out) if Path(out).is_absolute() else (base / out).resolve()
         reds = []
+        default_style = d.get("style", "block")
         for i, r in enumerate(d.get("redactions", [])):
             if "box" not in r:
                 sys.exit(f"gifcensor: redaction {i} has no box")
@@ -306,17 +318,23 @@ class Plan:
             box = Box(*bx) if isinstance(bx, list) else Box.parse(bx)
             fr = r.get("frames", "all")
             ranges = None if fr in ("all", None) else [tuple(int(v) for v in pair) for pair in fr]
+            style = r.get("style", default_style)
+            if style not in ("block", "blend"):
+                sys.exit(f"gifcensor: redaction {i}: style must be block or blend")
             reds.append(Redaction(r.get("label", f"redaction {i}"), box, ranges,
-                                  r.get("color", "auto")))
+                                  r.get("color", "auto"), style))
         if not reds:
             sys.exit("gifcensor: plan has no redactions")
         return Plan(src, out_p, reds)
 
 
 def resolve_color(gif: Gif, red: Redaction, work: Path) -> str:
-    """Pick the colour of the chrome around the box, so the cover looks native."""
+    """The fill. A block cover is deliberately loud; a blend takes the colour
+    of the chrome around the box so the cover reads as part of the UI."""
     if red.color != "auto":
         return normalise_color(red.color)
+    if red.style == "block":
+        return BLOCK_FILL
     a = red.ranges[0][0] if red.ranges else 0
     b = red.ranges[0][1] if red.ranges else gif.frames - 1
     n = (a + b) // 2
@@ -337,12 +355,14 @@ def filter_graph(plan: Plan, colors: list[str]) -> str:
     lines = ["[0:v]"]
     for red, col in zip(plan.redactions, colors):
         bx = red.box
-        part = (f"drawbox=x={bx.x}:y={bx.y}:w={bx.w}:h={bx.h}"
-                f":color=0x{col.lstrip('#')}@1:t=fill")
         en = red.enable()
-        if en:
-            part += f":enable='{en}'"
-        lines.append(part + ",")
+        strokes = [(col, "fill")] + ([(BLOCK_EDGE, "2")] if red.style == "block" else [])
+        for ink, thickness in strokes:
+            part = (f"drawbox=x={bx.x}:y={bx.y}:w={bx.w}:h={bx.h}"
+                    f":color=0x{ink.lstrip('#')}@1:t={thickness}")
+            if en:
+                part += f":enable='{en}'"
+            lines.append(part + ",")
     lines += [
         "split[a][b];",
         "[a]palettegen=stats_mode=diff[p];",
@@ -469,7 +489,7 @@ def cmd_apply(a) -> None:
         "output": str(plan.output), "frames": out.frames, "size": list(out.size),
         "bytes": plan.output.stat().st_size, "source_bytes": gif.path.stat().st_size,
         "redactions": [
-            {"label": r.label, "box": r.box.as_list(), "color": c,
+            {"label": r.label, "box": r.box.as_list(), "color": c, "style": r.style,
              "frames": "all" if r.ranges is None else [list(p) for p in r.ranges]}
             for r, c in zip(plan.redactions, colors)
         ],
@@ -486,16 +506,18 @@ def cmd_verify(a) -> None:
     report = []
     with tempfile.TemporaryDirectory() as td:
         work = Path(td)
-        for i, red in enumerate(plan.redactions):
-            wanted = red.sample_frames(out.frames - 1)
-            ns = [n for n, _ in wanted]
+        sampled = [red.sample_frames(out.frames - 1) for red in plan.redactions]
+        every = sorted({n for w in sampled for n, _ in w})
+        o_full = out.extract(every, work / "o")
+        s_full = src.extract(every, work / "s")
+        for i, (red, wanted) in enumerate(zip(plan.redactions, sampled)):
             view = red.box.grow(a.margin, out.size)
-            o_full = out.extract(ns, work / f"o{i}")
-            s_full = src.extract(ns, work / f"s{i}")
-            o_crop = out.extract(ns, work / f"oc{i}", box=view)
+            o_crop = {n: crop_to(o_full[n], view, work / f"oc{i}_{n:05d}.png")
+                      for n, _ in wanted}
             checks, rows = [], []
+            inner = red.box.inset(3) if red.style == "block" else red.box
             for n, kind in wanted:
-                flat = crop_stats(o_full[n], red.box)
+                flat = crop_stats(o_full[n], inner)
                 changed = rmse(o_full[n], s_full[n])
                 checks.append({"frame": n, "position": kind,
                                "box_flatness": flat, "differs_from_source": changed,

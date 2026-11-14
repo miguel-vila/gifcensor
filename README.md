@@ -36,14 +36,22 @@ back to source pixel coordinates.
 ```
 
 `box` is `[x, y, w, h]` in source pixels. `frames` is `"all"` or inclusive
-`[first, last]` ranges. `color` defaults to `auto`, which samples the ring just
-outside the box so the cover takes the colour of the surrounding UI.
+`[first, last]` ranges.
+
+`style` sets how a cover looks, per plan or per redaction:
+
+- `block` (the default) draws a grey panel with an accent border, so a viewer
+  sees at once that something was taken out.
+- `blend` fills with the colour sampled from the ring just outside the box, so
+  the cover disappears into the UI. Use it when the fact of a redaction is
+  itself distracting.
+
+`color` overrides the fill in either style.
 
 ## Choices
 
 - **Solid fill, not blur or pixelate.** Blurred text is often still readable and
-  sometimes recoverable. A flat box the colour of the chrome around it is
-  final, and looks deliberate rather than damaged.
+  sometimes recoverable. A flat box is final.
 - **Rectangles only.** Screen text sits in rectangles. ffmpeg's `drawbox` does
   this in one pass; an ellipse would need a mask overlay for no gain.
 - **Frame numbers, not timestamps.** Seeking a GIF by time is approximate, and a
