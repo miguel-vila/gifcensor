@@ -31,6 +31,8 @@ FONT_CANDIDATES = (
 )
 BLOCK_FILL = "#6B6B73"   # reads as a cover on both dark and light UIs
 BLOCK_EDGE = "#FF375F"   # accent border, so a cover is never mistaken for chrome
+BLUR_MIN_WINDOW = 16     # under this a smear keeps glyph-sized detail
+BLUR_MAX_WINDOW = 120    # over this nothing on a screen survives anyway
 LABEL_BG = "#101010"
 LABEL_FG = "#00ff66"
 GRID_INK = "#ff2d95"
@@ -219,6 +221,20 @@ def crop_stats(img: Path, box: Box) -> float:
         return -1.0
 
 
+def fine_detail(img: Path, box: Box) -> float:
+    """How much of a region survives a high-pass: the region against a blurred
+    copy of itself. Screen text measures around 0.02 and up, a smeared region
+    around 0.002, the rest being dither noise. Blind to slow gradients, so it
+    reports what a reader could still make out, not how busy the region is."""
+    out = run(["magick", img, "-crop", box.crop(), "+repage", "-colorspace", "gray",
+               "(", "+clone", "-blur", "0x2", ")", "-compose", "difference", "-composite",
+               "-format", "%[fx:standard_deviation]", "info:"])
+    try:
+        return round(float(out.strip().split()[0]), 5)
+    except (ValueError, IndexError):
+        return -1.0
+
+
 def rmse(a: Path, b: Path) -> float:
     out = run(["magick", "compare", "-metric", "RMSE", a, b, "null:"], stderr_ok=True)
     m = re.search(r"\(([\d.eE+-]+)\)", out)
@@ -262,6 +278,127 @@ def grid_overlay(img: Path, dst: Path, origin: tuple[int, int], scale: float,
 
 
 # --------------------------------------------------------------------------
+# covers
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Fill:
+    """A flat panel over the box. Nothing of the original survives it."""
+    style: str   # "block": a visible cover; "blend": the colour of the UI around it
+    color: str   # "#RRGGBB", or "auto" until resolved
+
+    def resolve(self, gif: "Gif", box: Box, ranges, work: Path) -> "Fill":
+        if self.color != "auto":
+            return Fill(self.style, normalise_color(self.color))
+        if self.style == "block":
+            return Fill(self.style, BLOCK_FILL)
+        return Fill(self.style, surrounding_color(gif, box, ranges, work))
+
+    def steps(self, tag: str, src: str, dst: str, box: Box, enable: str | None) -> list[str]:
+        inks = [(self.color, "fill")] + ([(BLOCK_EDGE, "2")] if self.style == "block" else [])
+        parts = []
+        for ink, thickness in inks:
+            part = (f"drawbox=x={box.x}:y={box.y}:w={box.w}:h={box.h}"
+                    f":color=0x{ink.lstrip('#')}@1:t={thickness}")
+            parts.append(part + (f":enable='{enable}'" if enable else ""))
+        return [src + ",\n".join(parts) + dst + ";"]
+
+    def measure(self, img: Path, box: Box) -> dict:
+        # The border eats the outer pixels of a block, so test inside it.
+        return {"box_flatness": crop_stats(img, box.inset(3) if self.style == "block" else box)}
+
+    def covered(self, m: dict, limits) -> bool:
+        return 0 <= m["box_flatness"] <= limits.flat_threshold
+
+    def report(self, box: Box) -> dict:
+        return {"style": self.style, "color": self.color}
+
+
+@dataclass(frozen=True)
+class Blur:
+    """An averaging smear over the box.
+
+    What hides the text is the averaging, not the softness: every pixel under
+    one window is replaced by the mean of that window, so whatever the window
+    swallows is gone from the file. The window therefore has to be large next
+    to the glyphs. A window near the height of the text leaves about one value
+    per character, which a search over rendered candidates can match; several
+    times the text height leaves one value per word, which puts that search out
+    of reach for anything but a short string the attacker can already guess.
+
+    Even then a smear is weaker than a fill: it still carries the shape and the
+    rough colour of what it covers, and a short, guessable string has little
+    left to guess. Use it where the fact of a redaction matters more than the
+    last bit of secrecy, and `Fill` for anything that must not come back.
+    """
+    window: int  # side, in source pixels, of the square each surviving pixel averages
+    style: str = "blur"
+
+    @staticmethod
+    def default_window(box: Box) -> int:
+        """Twice the box height. A one-line box is about as tall as its text,
+        so this puts several characters under each surviving pixel. A taller
+        box holds several lines and needs its own `window`; the cap keeps the
+        default from flattening it to a single colour."""
+        return max(BLUR_MIN_WINDOW, min(2 * box.h, BLUR_MAX_WINDOW))
+
+    def resolve(self, gif: "Gif", box: Box, ranges, work: Path) -> "Blur":
+        return self
+
+    def grid(self, box: Box) -> tuple[int, int]:
+        return max(1, round(box.w / self.window)), max(1, round(box.h / self.window))
+
+    def steps(self, tag: str, src: str, dst: str, box: Box, enable: str | None) -> list[str]:
+        cols, rows = self.grid(box)
+        # `area` is an exact box average: the downscale is where the detail
+        # dies. The upscale and gblur only make the result read as a blur
+        # instead of a mosaic; they put nothing back.
+        sigma = round(max(box.w / cols, box.h / rows) / 3, 2)
+        on = f":enable='{enable}'" if enable else ""
+        return [
+            f"{src}split[k{tag}][s{tag}];",
+            f"[s{tag}]crop={box.w}:{box.h}:{box.x}:{box.y},"
+            f"scale={cols}:{rows}:flags=area,"
+            f"scale={box.w}:{box.h}:flags=bilinear,gblur=sigma={sigma}[g{tag}];",
+            f"[k{tag}][g{tag}]overlay=x={box.x}:y={box.y}:format=rgb{on}{dst};",
+        ]
+
+    def measure(self, img: Path, box: Box) -> dict:
+        return {"box_detail": fine_detail(img, box)}
+
+    def covered(self, m: dict, limits) -> bool:
+        return 0 <= m["box_detail"] <= limits.detail_threshold
+
+    def report(self, box: Box) -> dict:
+        cols, rows = self.grid(box)
+        out = {"style": self.style, "window": self.window, "cells": [cols, rows]}
+        if self.window < min(box.h, BLUR_MAX_WINDOW):
+            out["warning"] = ("window is fine next to this box: a smear only destroys text "
+                              "when each window covers several characters")
+        return out
+
+
+Cover = Fill | Blur
+
+
+def read_cover(spec: dict, box: Box, default_style: str, where: str) -> Cover:
+    style = spec.get("style", default_style)
+    if style == "blur":
+        if "color" in spec:
+            sys.exit(f"gifcensor: {where}: a blur has no colour of its own; "
+                     f"drop `color` or use style block or blend")
+        window = int(spec.get("window", Blur.default_window(box)))
+        if window < 2:
+            sys.exit(f"gifcensor: {where}: window must be at least 2 source pixels")
+        return Blur(window)
+    if style in ("block", "blend"):
+        if "window" in spec:
+            sys.exit(f"gifcensor: {where}: `window` only applies to style blur")
+        return Fill(style, spec.get("color", "auto"))
+    sys.exit(f"gifcensor: {where}: style must be block, blend or blur")
+
+
+# --------------------------------------------------------------------------
 # the plan
 # --------------------------------------------------------------------------
 
@@ -270,8 +407,7 @@ class Redaction:
     label: str
     box: Box
     ranges: list[tuple[int, int]] | None  # None means every frame
-    color: str  # "#RRGGBB" or "auto"
-    style: str  # "block": a visible cover; "blend": take the colour around it
+    cover: Cover
 
     def enable(self) -> str | None:
         if self.ranges is None:
@@ -318,53 +454,40 @@ class Plan:
             box = Box(*bx) if isinstance(bx, list) else Box.parse(bx)
             fr = r.get("frames", "all")
             ranges = None if fr in ("all", None) else [tuple(int(v) for v in pair) for pair in fr]
-            style = r.get("style", default_style)
-            if style not in ("block", "blend"):
-                sys.exit(f"gifcensor: redaction {i}: style must be block or blend")
-            reds.append(Redaction(r.get("label", f"redaction {i}"), box, ranges,
-                                  r.get("color", "auto"), style))
+            cover = read_cover(r, box, default_style, f"redaction {i}")
+            reds.append(Redaction(r.get("label", f"redaction {i}"), box, ranges, cover))
         if not reds:
             sys.exit("gifcensor: plan has no redactions")
         return Plan(src, out_p, reds)
 
 
-def resolve_color(gif: Gif, red: Redaction, work: Path) -> str:
-    """The fill. A block cover is deliberately loud; a blend takes the colour
-    of the chrome around the box so the cover reads as part of the UI."""
-    if red.color != "auto":
-        return normalise_color(red.color)
-    if red.style == "block":
-        return BLOCK_FILL
-    a = red.ranges[0][0] if red.ranges else 0
-    b = red.ranges[0][1] if red.ranges else gif.frames - 1
+def surrounding_color(gif: Gif, box: Box, ranges, work: Path) -> str:
+    """The commonest colour in the ring just outside the box, so a blend cover
+    reads as part of the chrome around it."""
+    a = ranges[0][0] if ranges else 0
+    b = ranges[0][1] if ranges else gif.frames - 1
     n = (a + b) // 2
     frame = gif.extract([n], work / f"c{n}")[n]
-    bx = red.box
     pad = 5
     pts: list[tuple[int, int]] = []
     for t in (0.15, 0.5, 0.85):
         pts += [
-            (int(bx.x + bx.w * t), bx.y - pad), (int(bx.x + bx.w * t), bx.y + bx.h + pad),
-            (bx.x - pad, int(bx.y + bx.h * t)), (bx.x + bx.w + pad, int(bx.y + bx.h * t)),
+            (int(box.x + box.w * t), box.y - pad), (int(box.x + box.w * t), box.y + box.h + pad),
+            (box.x - pad, int(box.y + box.h * t)), (box.x + box.w + pad, int(box.y + box.h * t)),
         ]
     pts = [(min(max(x, 0), gif.width - 1), min(max(y, 0), gif.height - 1)) for x, y in pts]
     return Counter(pixel_colors(frame, pts)).most_common(1)[0][0]
 
 
-def filter_graph(plan: Plan, colors: list[str]) -> str:
-    lines = ["[0:v]"]
-    for red, col in zip(plan.redactions, colors):
-        bx = red.box
-        en = red.enable()
-        strokes = [(col, "fill")] + ([(BLOCK_EDGE, "2")] if red.style == "block" else [])
-        for ink, thickness in strokes:
-            part = (f"drawbox=x={bx.x}:y={bx.y}:w={bx.w}:h={bx.h}"
-                    f":color=0x{ink.lstrip('#')}@1:t={thickness}")
-            if en:
-                part += f":enable='{en}'"
-            lines.append(part + ",")
+def filter_graph(plan: Plan, covers: list[Cover]) -> str:
+    lines: list[str] = []
+    cur = "[0:v]"
+    for i, (red, cover) in enumerate(zip(plan.redactions, covers)):
+        nxt = f"[v{i}]"
+        lines += cover.steps(str(i), cur, nxt, red.box, red.enable())
+        cur = nxt
     lines += [
-        "split[a][b];",
+        f"{cur}split[a][b];",
         "[a]palettegen=stats_mode=diff[p];",
         "[b][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle",
     ]
@@ -475,8 +598,8 @@ def cmd_apply(a) -> None:
             sys.exit(f"gifcensor: {red.label!r}: box {b.as_list()} outside {gif.size}")
     with tempfile.TemporaryDirectory() as td:
         work = Path(td)
-        colors = [resolve_color(gif, r, work) for r in plan.redactions]
-        graph = filter_graph(plan, colors)
+        covers = [r.cover.resolve(gif, r.box, r.ranges, work) for r in plan.redactions]
+        graph = filter_graph(plan, covers)
         if a.dry_run:
             print(graph)
             return
@@ -489,9 +612,10 @@ def cmd_apply(a) -> None:
         "output": str(plan.output), "frames": out.frames, "size": list(out.size),
         "bytes": plan.output.stat().st_size, "source_bytes": gif.path.stat().st_size,
         "redactions": [
-            {"label": r.label, "box": r.box.as_list(), "color": c, "style": r.style,
-             "frames": "all" if r.ranges is None else [list(p) for p in r.ranges]}
-            for r, c in zip(plan.redactions, colors)
+            {"label": r.label, "box": r.box.as_list(),
+             "frames": "all" if r.ranges is None else [list(p) for p in r.ranges],
+             **c.report(r.box)}
+            for r, c in zip(plan.redactions, covers)
         ],
     })
 
@@ -515,19 +639,19 @@ def cmd_verify(a) -> None:
             o_crop = {n: crop_to(o_full[n], view, work / f"oc{i}_{n:05d}.png")
                       for n, _ in wanted}
             checks, rows = [], []
-            inner = red.box.inset(3) if red.style == "block" else red.box
             for n, kind in wanted:
-                flat = crop_stats(o_full[n], inner)
+                m = red.cover.measure(o_full[n], red.box)
                 changed = rmse(o_full[n], s_full[n])
-                checks.append({"frame": n, "position": kind,
-                               "box_flatness": flat, "differs_from_source": changed,
-                               "covered": kind != "in" or (flat <= a.flat_threshold and changed > 0)})
+                checks.append({"frame": n, "position": kind, **m,
+                               "differs_from_source": changed,
+                               "covered": kind != "in"
+                                          or (red.cover.covered(m, a) and changed > 0)})
                 rows.append(labelled(o_crop[n], f"{n}\n{kind}", work / f"v{i}_{n:05d}.png"))
             img = outdir / f"{i:02d}_{re.sub(r'[^a-z0-9]+', '_', red.label.lower())}.png"
             run(["magick"] + [str(r) for r in rows] +
                 ["-background", "#ff0000", "-splice", "0x1", "-append", str(img)])
             report.append({
-                "label": red.label, "box": red.box.as_list(),
+                "label": red.label, "box": red.box.as_list(), **red.cover.report(red.box),
                 "frames": "all" if red.ranges is None else [list(p) for p in red.ranges],
                 "image": str(img.resolve()), "checks": checks,
                 "machine_pass": all(c["covered"] for c in checks),
@@ -535,10 +659,11 @@ def cmd_verify(a) -> None:
     emit({
         "output": str(plan.output), "machine_pass": all(r["machine_pass"] for r in report),
         "redactions": report,
-        "note": "machine_pass only says the box is one flat colour and differs from the "
-                "source. Look at every image: rows marked `before`/`after` must not show "
-                "the secret either, and the whole output still needs a `sheet` pass for "
-                "anything the plan missed.",
+        "note": "machine_pass only says the cover landed: the box differs from the source "
+                "and holds no detail at glyph scale. Look at every image: rows marked "
+                "`before`/`after` must not show the secret either, a blur must leave no "
+                "word shape you can read, and the whole output still needs a `sheet` pass "
+                "for anything the plan missed.",
     })
 
 
@@ -597,7 +722,10 @@ def main() -> None:
     s.add_argument("--outdir", required=True)
     s.add_argument("--out-gif", default=None)
     s.add_argument("--margin", type=int, default=40)
-    s.add_argument("--flat-threshold", type=float, default=0.03)
+    s.add_argument("--flat-threshold", type=float, default=0.03,
+                   help="how flat a block or blend cover must be")
+    s.add_argument("--detail-threshold", type=float, default=0.01,
+                   help="how little glyph-scale detail a blur cover may leave")
     s.set_defaults(fn=cmd_verify)
 
     a = p.parse_args()

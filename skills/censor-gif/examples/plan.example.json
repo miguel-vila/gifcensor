@@ -33,6 +33,12 @@
       "box": [1256, 476, 204, 58],
       "frames": [[0, 230]],
       "style": "blend"
+    },
+    {
+      "label": "chat panel, blurred so its layout still reads",
+      "box": [1256, 300, 204, 160],
+      "frames": "all",
+      "style": "blur"
     }
   ]
 }
